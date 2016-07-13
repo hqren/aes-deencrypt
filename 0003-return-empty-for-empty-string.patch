@@ -1,0 +1,45 @@
+From 170df55b9b167866be3e1cd9c94a9baf2a318b31 Mon Sep 17 00:00:00 2001
+From: Zuo Wang <wangzuo.nj@qq.com>
+Date: Tue, 12 Jul 2016 19:36:11 -0700
+Subject: [PATCH 3/3] return empty for empty string
+
+Change-Id: I6cb7858a3ebd82307a4052d89a32aeccabd408c8
+---
+ be/src/udf_samples/aes-deencrypt.cc | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/be/src/udf_samples/aes-deencrypt.cc b/be/src/udf_samples/aes-deencrypt.cc
+index 6e6021c..07249a8 100644
+--- a/be/src/udf_samples/aes-deencrypt.cc
++++ b/be/src/udf_samples/aes-deencrypt.cc
+@@ -50,9 +50,13 @@ void AESClose(FunctionContext* context,
+ 
+ StringVal AESDecrypt(FunctionContext* context, const StringVal& arg1,
+     const StringVal& arg2) {
++  // return null for empty string
+   if (arg1.is_null || arg2.is_null || arg2.len > CryptoPP::AES::DEFAULT_KEYLENGTH) {
+     return StringVal::null();
+   }
++  if (arg1.len == 0) {
++    return StringVal();
++  }
+ 
+   AES_KEY* aes = reinterpret_cast<AES_KEY*>(context->GetFunctionState(
+       FunctionContext::THREAD_LOCAL));
+@@ -88,9 +92,13 @@ StringVal AESDecrypt(FunctionContext* context, const StringVal& arg1,
+ 
+ StringVal AESEncrypt(FunctionContext* context, const StringVal& arg1,
+     const StringVal& arg2) {
++  // return null for empty string
+   if (arg1.is_null || arg2.is_null || arg2.len > CryptoPP::AES::DEFAULT_KEYLENGTH) {
+     return StringVal::null();
+   }
++  if (arg1.len == 0) {
++    return StringVal();
++  }
+ 
+   AES_KEY* aes = reinterpret_cast<AES_KEY*>(context->GetFunctionState(
+       FunctionContext::THREAD_LOCAL));
+-- 
+2.8.1
+

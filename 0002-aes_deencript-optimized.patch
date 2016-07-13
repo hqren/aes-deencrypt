@@ -1,0 +1,171 @@
+From 89b19ff68f6821fbd4d5fa577b6fc6ec00d95bbe Mon Sep 17 00:00:00 2001
+From: Zuo Wang <wangzuo.nj@qq.com>
+Date: Sun, 10 Jul 2016 18:17:38 -0700
+Subject: [PATCH 2/3] aes_deencript optimized
+
+Change-Id: I1810a26ae94980e7e70c70bb685cc1354b170760
+---
+ be/src/udf_samples/aes-deencrypt.cc | 110 +++++++++++++++++++++++++++---------
+ be/src/udf_samples/aes-deencrypt.h  |   7 ++-
+ 2 files changed, 89 insertions(+), 28 deletions(-)
+
+diff --git a/be/src/udf_samples/aes-deencrypt.cc b/be/src/udf_samples/aes-deencrypt.cc
+index 7cb9da5..6e6021c 100644
+--- a/be/src/udf_samples/aes-deencrypt.cc
++++ b/be/src/udf_samples/aes-deencrypt.cc
+@@ -19,49 +19,107 @@
+ #include "modes.h"
+ 
+ #include "util/jni-util.h"
++#include "exprs/anyval-util.h"
+ 
+-StringVal AES_Decrypt(FunctionContext* context, const StringVal& arg1,
++struct AES_KEY {
++  byte key[CryptoPP::AES::DEFAULT_KEYLENGTH];
++  byte iv[CryptoPP::AES::BLOCKSIZE];
++};
++
++void AESPrepare(FunctionContext* context,
++    FunctionContext::FunctionStateScope scope) {
++  if (scope != FunctionContext::THREAD_LOCAL) return;
++
++  AES_KEY* aes = new AES_KEY;
++  memset(aes->key, 0x00, CryptoPP::AES::DEFAULT_KEYLENGTH);
++  memset(aes->iv, 0x00, CryptoPP::AES::BLOCKSIZE);
++  
++  StringVal* arg1 = reinterpret_cast<StringVal*>(context->GetConstantArg(1));
++  if (arg1->is_null) return;
++  for (int i = 0; i < arg1->len; ++i) aes->key[i % 16] ^= arg1->ptr[i];
++
++  context->SetFunctionState(scope, aes);
++}
++
++void AESClose(FunctionContext* context,
++    FunctionContext::FunctionStateScope scope) {
++  if (scope != FunctionContext::THREAD_LOCAL) return;
++  AES_KEY* aes = reinterpret_cast<AES_KEY*>(context->GetFunctionState(scope));
++  delete aes;
++}
++
++StringVal AESDecrypt(FunctionContext* context, const StringVal& arg1,
+     const StringVal& arg2) {
+   if (arg1.is_null || arg2.is_null || arg2.len > CryptoPP::AES::DEFAULT_KEYLENGTH) {
+     return StringVal::null();
+   }
+ 
+-  byte key[CryptoPP::AES::DEFAULT_KEYLENGTH];
+-  byte iv[CryptoPP::AES::BLOCKSIZE];
+-  memset(key, 0x00, CryptoPP::AES::DEFAULT_KEYLENGTH);
+-  memset(iv, 0x00, CryptoPP::AES::BLOCKSIZE);
+-  for (int i = 0; i < arg2.len; ++i) key[i] = arg2.ptr[i];
+-
+-  CryptoPP::AES::Decryption aesDecryption(key, CryptoPP::AES::DEFAULT_KEYLENGTH);  
+-  CryptoPP::CBC_Mode_ExternalCipher::Decryption cbcDecryption(aesDecryption, iv);
++  AES_KEY* aes = reinterpret_cast<AES_KEY*>(context->GetFunctionState(
++      FunctionContext::THREAD_LOCAL));
+   std::string result_str;
+-  CryptoPP::StreamTransformationFilter stfDecryptor(
+-      cbcDecryption, new CryptoPP::StringSink(result_str));
+-  stfDecryptor.Put(arg1.ptr, arg1.len);
+-  stfDecryptor.MessageEnd();
++  try {
++    CryptoPP::CBC_Mode<CryptoPP::AES>::Decryption d;
++    d.SetKeyWithIV(aes->key, sizeof(aes->key), aes->iv);
++    std::string input = impala::AnyValUtil::ToString(arg1);
++    // The StreamTransformationFilter removes
++    //  padding as required.
++    CryptoPP::StringSource s(input, true, 
++      new CryptoPP::StreamTransformationFilter(d,
++        new CryptoPP::StringSink(result_str)
++      ) // StreamTransformationFilter
++    ); // StringSource
++  } catch (const CryptoPP::Exception& e) {
++    context->AddWarning(e.what());
++    return StringVal::null();
++  }
+   return StringVal::CopyFrom(context, 
+       reinterpret_cast<const uint8_t*>(result_str.c_str()), result_str.size());
++
++  //CryptoPP::AES::Decryption aesDecryption(aes->key, CryptoPP::AES::DEFAULT_KEYLENGTH);  
++  //CryptoPP::CBC_Mode_ExternalCipher::Decryption cbcDecryption(aesDecryption, aes->iv);
++  //std::string result_str;
++  //CryptoPP::StreamTransformationFilter stfDecryptor(
++  //    cbcDecryption, new CryptoPP::StringSink(result_str));
++  //stfDecryptor.Put(arg1.ptr, arg1.len);
++  //stfDecryptor.MessageEnd();
++  //return StringVal::CopyFrom(context, 
++  //    reinterpret_cast<const uint8_t*>(result_str.c_str()), result_str.size());
+ }
+ 
+-StringVal AES_Encrypt(FunctionContext* context, const StringVal& arg1,
++StringVal AESEncrypt(FunctionContext* context, const StringVal& arg1,
+     const StringVal& arg2) {
+   if (arg1.is_null || arg2.is_null || arg2.len > CryptoPP::AES::DEFAULT_KEYLENGTH) {
+     return StringVal::null();
+   }
+ 
+-  byte key[CryptoPP::AES::DEFAULT_KEYLENGTH];
+-  byte iv[CryptoPP::AES::BLOCKSIZE];
+-  memset(key, 0x00, CryptoPP::AES::DEFAULT_KEYLENGTH);
+-  memset(iv, 0x00, CryptoPP::AES::BLOCKSIZE);
+-  for (int i = 0; i < arg2.len; ++i) key[i] = arg2.ptr[i];
+-
+-  CryptoPP::AES::Encryption aesEncryption(key, CryptoPP::AES::DEFAULT_KEYLENGTH);  
+-  CryptoPP::CBC_Mode_ExternalCipher::Encryption cbcEncryption(aesEncryption, iv);
++  AES_KEY* aes = reinterpret_cast<AES_KEY*>(context->GetFunctionState(
++      FunctionContext::THREAD_LOCAL));
+   std::string result_str;
+-  CryptoPP::StreamTransformationFilter stfEncryptor(
+-      cbcEncryption, new CryptoPP::StringSink(result_str));
+-  stfEncryptor.Put(arg1.ptr, arg1.len);
+-  stfEncryptor.MessageEnd();
++  try {
++    CryptoPP::CBC_Mode<CryptoPP::AES>::Encryption e;
++    e.SetKeyWithIV(aes->key, sizeof(aes->key), aes->iv);
++    std::string input = impala::AnyValUtil::ToString(arg1);
++    // The StreamTransformationFilter removes
++    //  padding as required.
++    CryptoPP::StringSource s(input, true, 
++      new CryptoPP::StreamTransformationFilter(e,
++        new CryptoPP::StringSink(result_str)
++      ) // StreamTransformationFilter
++    ); // StringSource
++  } catch (const CryptoPP::Exception& e) {
++    context->AddWarning(e.what());
++    return StringVal::null();
++  }
+   return StringVal::CopyFrom(context, 
+       reinterpret_cast<const uint8_t*>(result_str.c_str()), result_str.size());
++
++  //CryptoPP::AES::Encryption aesEncryption(aes->key, CryptoPP::AES::DEFAULT_KEYLENGTH);  
++  //CryptoPP::CBC_Mode_ExternalCipher::Encryption cbcEncryption(aesEncryption, aes->iv);
++  //std::string result_str;
++  //CryptoPP::StreamTransformationFilter stfEncryptor(
++  //    cbcEncryption, new CryptoPP::StringSink(result_str));
++  //stfEncryptor.Put(arg1.ptr, arg1.len);
++  //stfEncryptor.MessageEnd();
++  //return StringVal::CopyFrom(context, 
++  //    reinterpret_cast<const uint8_t*>(result_str.c_str()), result_str.size());
+ }
+diff --git a/be/src/udf_samples/aes-deencrypt.h b/be/src/udf_samples/aes-deencrypt.h
+index 0437034..a4ad7ad 100644
+--- a/be/src/udf_samples/aes-deencrypt.h
++++ b/be/src/udf_samples/aes-deencrypt.h
+@@ -20,9 +20,12 @@
+ 
+ using namespace impala_udf;
+ 
+-StringVal AES_Decrypt(FunctionContext* context, const StringVal& arg1,
++void AESPrepare(FunctionContext* ctx, FunctionContext::FunctionStateScope scope);
++void AESClose(FunctionContext* ctx, FunctionContext::FunctionStateScope scope);
++
++StringVal AESEncrypt(FunctionContext* context, const StringVal& arg1,
+     const StringVal& arg2);
+-StringVal AES_Decrypt(FunctionContext* context, const StringVal& arg1,
++StringVal AESDecrypt(FunctionContext* context, const StringVal& arg1,
+     const StringVal& arg2);
+ 
+ #endif
+-- 
+2.8.1
+
